@@ -6,7 +6,7 @@ releases, in their original form or as smaller int8 files, on the full or the pr
 | Release | Task | Steps | Adapter files |
 |---|---|---|---|
 | EPFL ([epfl-vita/PTD-weights](https://huggingface.co/epfl-vita/PTD-weights)) | fl2va | 4, 6 | bf16 / int8 / int8 r5 in [nynxz/MiniMax-H3-PTD-LoRAs](https://huggingface.co/nynxz/MiniMax-H3-PTD-LoRAs) |
-| taobao-content-ai ([MiniMax-H3-PTD-LoRAs](https://huggingface.co/taobao-content-ai/MiniMax-H3-PTD-LoRAs)) | Ref2VA | 4, 8 | their bf16 files, or int8 made with this pack |
+| taobao-content-ai ([MiniMax-H3-PTD-LoRAs](https://huggingface.co/taobao-content-ai/MiniMax-H3-PTD-LoRAs)) | Ref2VA | 4, 8 | their bf16 files, or `ptd_h3_ref2va_{4,8}step_int8` in [nynxz/MiniMax-H3-PTD-LoRAs](https://huggingface.co/nynxz/MiniMax-H3-PTD-LoRAs) |
 
 ## Install
 
@@ -22,7 +22,8 @@ Put the adapter files in `ComfyUI/models/ptd/`, then wire
 `Load Diffusion Model → Load PTD MiniMax-H3 Adapters (compact) → Basic Guider + PTD Sampler (compact) +
 PTD Sigmas (compact) → SamplerCustomAdvanced`
 
-The step count comes from the file. With this loader in the graph, the official PTD Sampler / Sigmas work
+For Ref2VA files, load a **ref2va** base and condition with **MiniMax H3 Reference to Video**. The step count
+comes from the file. With this loader in the graph, the official PTD Sampler / Sigmas work
 too, for both releases (they are pointed at the same code). If ComfyUI imports the official pack first, its
 `No module named 'ptd'` error in the log is harmless: this pack registers the official nodes itself.
 
@@ -55,7 +56,7 @@ with a small curve table, which matches the original AdaLN to within 0.03% at bo
 Each per-step adapter's error against the original is under 1.2% (mean 0.4–0.9%), at a quarter (EPFL) or
 half (Ref2VA, from bf16) of the size. To make one from a Ref2VA file:
 
-    python tools/ref2va_int8.py MiniMax-H3-Ref2VA-PTD-4Step.safetensors MiniMax-H3-Ref2VA-PTD-4Step_int8.safetensors
+    python tools/ref2va_int8.py MiniMax-H3-Ref2VA-PTD-4Step.safetensors ptd_h3_ref2va_4step_int8.safetensors
 
 In side-by-side renders (same seed), swapping bf16 for int8 adapters, the pruned int8 base for the pruned
 bf16 one, or `exact` for `fast` each changes the video by the same small amount, at the level of rounding

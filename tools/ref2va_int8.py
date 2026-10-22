@@ -1,6 +1,6 @@
 """Write the int8 version of a taobao-content-ai Ref2VA PTD file and report each adapter's error.
 
-    python tools/ref2va_int8.py MiniMax-H3-Ref2VA-PTD-4Step.safetensors MiniMax-H3-Ref2VA-PTD-4Step_int8.safetensors
+    python tools/ref2va_int8.py MiniMax-H3-Ref2VA-PTD-4Step.safetensors ptd_h3_ref2va_4step_int8.safetensors
 
 Needs torch and safetensors only. The error of each hop's B.A against the original is exact, computed from
 rank x rank Gram matrices.
