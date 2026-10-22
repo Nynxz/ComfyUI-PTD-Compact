@@ -30,6 +30,8 @@ import torch.nn.functional as F
 from safetensors import safe_open
 from tqdm.auto import tqdm
 
+from . import pdd
+
 COMPACT = "comfyui-native-h3-compact"
 _SWAP = threading.RLock()
 
@@ -344,9 +346,35 @@ def _install_residual(patcher):
         patcher._residual = _residual_in_place
 
 
+def _sampling(patcher):
+    return importlib.import_module(patcher.__name__.rsplit(".", 1)[0] + ".sampling")
+
+
+_pdd_sample = _with_progress(pdd.sample)
+
+
+def make_sampler(model):
+    """SAMPLER for a PTD MODEL: the checkpoint's own hop grid for Ref2VA files, the official one otherwise."""
+    from comfy.samplers import KSAMPLER
+    _, patcher = ptd_modules()
+    controller = patcher.get_ptd_controller(model)
+    if hasattr(controller, "sigmas"):
+        return KSAMPLER(_pdd_sample, extra_options={"controller": controller, "sampling": _sampling(patcher)})
+    _install_progress(patcher)
+    return _sampling(patcher).make_sampler(controller, controller.recipe)
+
+
+def sigmas(model):
+    _, patcher = ptd_modules()
+    controller = patcher.get_ptd_controller(model)
+    if hasattr(controller, "sigmas"):
+        return controller.sigmas.float()
+    return _sampling(patcher).ptd_sigmas(controller.recipe)
+
+
 def _install_progress(patcher):
     """Wrap the registered pack's ``sample_ptd``; ``make_sampler`` looks it up when PTD Sampler runs."""
-    sampling = importlib.import_module(patcher.__name__.rsplit(".", 1)[0] + ".sampling")
+    sampling = _sampling(patcher)
     if not getattr(sampling.sample_ptd, "ptd_progress", False):
         sampling.sample_ptd = _with_progress(sampling.sample_ptd)
 
@@ -373,6 +401,13 @@ def _patch(model, path):
     _install_progress(patcher)
     _install_residual(patcher)
     tensors, meta = read(path)
+    if pdd.is_pdd(meta):  # taobao-content-ai Ref2VA files (bf16, or this pack's int8 version)
+        for key, value in tensors.items():
+            if value.is_floating_point() and not bool(torch.isfinite(value).all()):
+                raise ValueError(f"Non-finite values in {key}")
+        if getattr(model.get_model_object("diffusion_model"), "use_adaln_curves", False):
+            logging.info("PTD Compact: pruned (AdaLN-curve) MiniMax-H3 base; adapted layers are identical to the full model")
+        return pdd.patch(model, tensors, meta, patcher, _sampling(patcher), _controller_class(patcher), QExpert)
     if meta.get("ptd_format") == checkpoint.FORMAT:
         tensors, meta = checkpoint.load_adapter_file(path)
         with _SWAP, _accept_curve_base(model):

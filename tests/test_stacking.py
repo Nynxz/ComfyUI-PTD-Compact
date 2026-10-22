@@ -391,3 +391,102 @@ def test_loader_installs_the_in_place_residual(tmp_path):
     adapter_file(str(tmp_path / "a.safetensors"), base.get_model_object("diffusion_model"))
     compact.patch_compact(base, str(tmp_path / "a.safetensors"))
     assert compact.ptd_modules()[1]._residual is compact._residual_in_place
+
+
+# ------------------------------------------------------------------ Ref2VA (taobao-content-ai) files
+
+def ref2va_file(path, native, hops=4, steps=32, rank=8):
+    """A random file in the taobao Ref2VA layout: factors stacked over hops, bf16, plus a PDD head bank."""
+    g = torch.Generator().manual_seed(1)
+    parts = {"attn.to_q": ("attn.qkv_proj", 3), "attn.to_k": ("attn.qkv_proj", 3), "attn.to_v": ("attn.qkv_proj", 3),
+             "attn.to_out.0": ("attn.out_proj", 1), "ff.net.0.proj": ("mlp.fc1", 1), "ff.net.2": ("mlp.fc2", 1)}
+    t = {}
+    for prefix, native_prefix, n in (("transformer_blocks", "blocks", len(native.blocks)),
+                                     ("token_refiner.refiner_blocks", "token_refiner.blocks", len(native.token_refiner.blocks))):
+        for i in range(n):
+            for part, (module, div) in parts.items():
+                layer = native.get_submodule(f"{native_prefix}.{i}.{module}")
+                t[f"{prefix}.{i}.{part}.lora_down"] = (torch.randn(hops, rank, layer.in_features, generator=g) * 0.1).bfloat16()
+                t[f"{prefix}.{i}.{part}.lora_up"] = (torch.randn(hops, layer.out_features // div, rank, generator=g) * 0.1).bfloat16()
+    for prefix, head in (("proj_out", native.final_layer.video_out), ("audio_proj_out", native.final_layer.audio_out)):
+        w = head.weight.detach().float()
+        t[f"{prefix}.weight"] = (w[None] + torch.randn(steps, *w.shape, generator=g) * 0.05).bfloat16()
+        t[f"{prefix}.bias"] = (torch.randn(steps, w.shape[0], generator=g) * 0.05).bfloat16()
+    save_file(t, path, metadata={"ptd_num_hops": str(hops), "pdd_num_steps": str(steps), "lora_rank": str(rank),
+                                 "lora_alpha": f"{rank}.0", "format": "pt"})
+
+
+def _sample_with(model):
+    import comfy.nested_tensor
+    import comfy.samplers
+    guider = comfy.samplers.CFGGuider(model)
+    context = torch.randn(1, 6, DIMS["text_dim"], generator=torch.Generator().manual_seed(3))
+    guider.set_conds([[context, {}]], [[context, {}]])
+    guider.set_cfg(1.0)
+    video, audio = torch.zeros(1, 24, 2, 4, 4), torch.zeros(1, 32, 2, 3)
+    noise = comfy.nested_tensor.NestedTensor([torch.randn(video.shape, generator=torch.Generator().manual_seed(4)),
+                                              torch.randn(audio.shape, generator=torch.Generator().manual_seed(5))])
+    try:
+        out = guider.sample(noise, comfy.nested_tensor.NestedTensor([video, audio]), compact.make_sampler(model),
+                            compact.sigmas(model), disable_pbar=True, seed=7)
+    finally:
+        comfy.model_management.unload_all_models()
+    return [t.clone() for t in out.unbind()]
+
+
+@pytest.mark.parametrize("hops", [4, 8])
+def test_ref2va_hop_grid(hops):
+    """One knot per hop on the T_MAX clock, descending to 0; each hop's head plan averages its block."""
+    sig = compact.pdd.hop_sigmas(hops)
+    assert sig.shape == (hops + 1,) and abs(float(sig[0]) - compact.pdd.T_MAX) < 1e-12 and float(sig[-1]) == 0.0
+    assert bool((sig.diff() < 0).all())
+    for video, audio in compact.pdd.hop_plans(hops):
+        for plan in (video, audio):
+            assert abs(float(plan.sum()) - 1) < 1e-6 and int((plan > 0).sum()) == 32 // hops
+
+
+@pytest.mark.parametrize("curve", [False, True], ids=["full", "pruned"])
+def test_ref2va_samples_on_full_and_pruned_bases(tmp_path, curve):
+    """The Ref2VA path loads on either base; exact and fast agree; int8 stays close to bf16."""
+    path, qpath = tmp_path / "ref2va.safetensors", tmp_path / "ref2va_int8.safetensors"
+    ref2va_file(str(path), native_model(curve).get_model_object("diffusion_model"))
+    qtensors, qmeta = compact.pdd.to_int8(*compact.read(str(path)))
+    save_file(qtensors, str(qpath), metadata=qmeta)
+    exact = _sample_with(compact.patch_compact(native_model(curve), str(path)))
+    fast = _sample_with(compact.patch_compact(native_model(curve), str(path), "fast (native kernels)"))
+    q = _sample_with(compact.patch_compact(native_model(curve), str(qpath)))
+    for e, f, i in zip(exact, fast, q):
+        assert torch.isfinite(e).all()
+        assert torch.allclose(e, f, rtol=1e-4, atol=1e-4)
+        assert torch.allclose(e, i, rtol=1e-2, atol=1e-2)
+
+
+def test_ref2va_heads_replace_the_native_heads(tmp_path):
+    """During a hop the video head returns the hop's fused PDD head, not the base head."""
+    base = native_model()
+    ref2va_file(str(tmp_path / "r.safetensors"), base.get_model_object("diffusion_model"))
+    model = compact.patch_compact(base, str(tmp_path / "r.safetensors"))
+    controller = model.model_options["ptd_native_controller"]
+    head = model.get_model_object("diffusion_model").final_layer.video_out
+    x = torch.randn(5, head.in_features)
+    plain = head(x)
+    with controller.activate(1, float(controller.sigmas[1])), controller.forward_hooks(controller.current_selection()):
+        hopped = head(x)
+    weight, bias, _ = controller._heads[1]["final_layer.video_out"]
+    assert torch.allclose(hopped, torch.nn.functional.linear(x, weight, bias), atol=1e-5)
+    assert not torch.allclose(hopped, plain, atol=1e-3)
+    assert torch.equal(head(x), plain), "the hook is gone after the hop"
+
+
+def test_compact_sampler_and_sigmas_cover_both_formats(tmp_path):
+    """Ref2VA gets its own grid; fl2va files get the official recipe grid and sampler."""
+    base = native_model()
+    ref2va_file(str(tmp_path / "r.safetensors"), base.get_model_object("diffusion_model"))
+    r = compact.patch_compact(base, str(tmp_path / "r.safetensors"))
+    assert torch.equal(compact.sigmas(r), compact.pdd.hop_sigmas(4).float())
+    base = native_model()
+    adapter_file(str(tmp_path / "a.safetensors"), base.get_model_object("diffusion_model"))
+    e = compact.patch_compact(base, str(tmp_path / "a.safetensors"))
+    from ptd_comfy.sampling import ptd_sigmas
+    assert torch.equal(compact.sigmas(e), ptd_sigmas("h3_4step"))
+    assert compact.make_sampler(e).sampler_function.ptd_progress
