@@ -56,3 +56,8 @@ curve table, which matches the original AdaLN to within 0.03% at PTD's step time
 
     PYTHONPATH=/path/to/ComfyUI:/path/to/ComfyUI-PTD:/path/to/custom_nodes \
         python -m pytest tests -q --import-mode=importlib
+
+## License
+
+Apache-2.0, like the official ComfyUI-PTD pack it builds on. The PTD adapter weights and MiniMax-H3 have
+their own licences; see the [model repo](https://huggingface.co/nynxz/MiniMax-H3-PTD-LoRAs).
