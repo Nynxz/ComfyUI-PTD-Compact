@@ -656,3 +656,25 @@ def test_node_with_real_selflift(tmp_path, rho):
         comfy.model_management.unload_all_models()
     video, audio = out["samples"].unbind()
     assert video.shape == (1, 24, 2, 4, 4) and torch.isfinite(video).all() and torch.isfinite(audio).all()
+
+
+def test_memory_is_reset_before_the_first_hop(tmp_path, monkeypatch):
+    """The watermark / cache reset runs before hop 0 too (a SelfLift transition precedes it in the same node)."""
+    seen = []
+    monkeypatch.setattr(compact, "_between_hops", lambda model, hop: seen.append(hop))
+    _sample_with(_ref2va_model(tmp_path))
+    assert seen == ["start", 0, 1, 2, 3]
+
+
+@pytest.mark.skipif(not os.environ.get("PTD_SELFLIFT_DIR"), reason="set PTD_SELFLIFT_DIR to a comfyui-SelfLift checkout")
+@pytest.mark.parametrize("rho,unloaded", [(0.0, False), (0.6, True)])
+def test_vae_is_unloaded_after_the_pixel_anchor(tmp_path, monkeypatch, rho, unloaded):
+    import comfy.model_management
+    calls = []
+    monkeypatch.setattr(comfy.model_management, "unload_model_and_clones",
+                        lambda patcher, **kw: calls.append(patcher))
+    vae = _PixelVAE()
+    vae.patcher = object()
+    lift, combine = progressive.selflift_lift(vae, rho, 1.0, 1.0)
+    lift(torch.randn(1, 24, 2, 2, 2), (4, 4))
+    assert calls == ([vae.patcher] if unloaded else [])

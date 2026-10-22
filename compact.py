@@ -257,10 +257,10 @@ def _with_progress(sample):
                 callback(record)
 
         controller = kwargs.get("controller")
-        if torch.cuda.is_available():
-            # Whatever the previous node (VAE decode, text encoders) left in PyTorch's cache is VRAM the
-            # allocation compiler cannot get when it starts recording.
-            torch.cuda.empty_cache()
+        # Whatever ran before the first hop (VAE decode, text encoders, or a SelfLift transition inside the same
+        # node) may have left PyTorch's cache full, which the allocation compiler cannot get when it starts
+        # recording, and the base model's watermark lowered, which would stream the first hop from RAM.
+        _between_hops(model, "start")
         start = time.perf_counter()
         try:
             try:

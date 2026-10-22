@@ -76,6 +76,12 @@ def selflift_lift(vae, rho, w_min, w_max, upscaler_model="none", upscaler_unload
 
     def lift(z0_low, out_hw):
         z_lat, z_pix = selflift.paired_lifts(z0_low, vae, out_hw, "nearest", lifter, need_lat=need_lat, need_pix=need_pix)
+        if need_pix and getattr(vae, "patcher", None) is not None:
+            # The full-size VAE encode leaves the VAE and its workspace in VRAM; the full-resolution hops come
+            # next and need that room for the base model.
+            import comfy.model_management
+            comfy.model_management.unload_model_and_clones(vae.patcher, unload_additional_models=False)
+            comfy.model_management.soft_empty_cache()
         return z_lat, z_pix
 
     def combine(z_lat, z_pix):
