@@ -1,12 +1,13 @@
 # ComfyUI-PTD-Compact
 
-A loader, sampler and sigmas node for MiniMax-H3 PTD few-step adapters in ComfyUI. It loads both PTD
-releases, in their original form or as smaller int8 files, on the full or the pruned base:
+A loader, sampler and sigmas node for MiniMax-H3 PTD few-step adapters in ComfyUI. It loads the PTD
+releases below, in their original form or as smaller int8 files, on the full or the pruned base:
 
 | Release | Task | Steps | Adapter files |
 |---|---|---|---|
 | EPFL ([epfl-vita/PTD-weights](https://huggingface.co/epfl-vita/PTD-weights)) | fl2va | 4, 6 | bf16 / int8 / int8 r5 in [nynxz/MiniMax-H3-PTD-LoRAs](https://huggingface.co/nynxz/MiniMax-H3-PTD-LoRAs) |
 | taobao-content-ai ([MiniMax-H3-PTD-LoRAs](https://huggingface.co/taobao-content-ai/MiniMax-H3-PTD-LoRAs)) | Ref2VA | 4, 8 | their bf16 files, or `ptd_h3_ref2va_{4,8}step_int8` in [nynxz/MiniMax-H3-PTD-LoRAs](https://huggingface.co/nynxz/MiniMax-H3-PTD-LoRAs) |
+| taobao-content-ai ([MiniMax-H3-PTD-RefAsymOPD-LoRAs](https://huggingface.co/taobao-content-ai/MiniMax-H3-PTD-RefAsymOPD-LoRAs)) | Ref2VA | 8 | their bf16 file, or `ptd_h3_ref2va_refasymopd_8step_int8` in [nynxz/MiniMax-H3-PTD-LoRAs](https://huggingface.co/nynxz/MiniMax-H3-PTD-LoRAs) |
 
 ## Install
 

@@ -25,8 +25,9 @@ with safe_open(src, "pt") as f:
 if not pdd.is_pdd(meta):
     sys.exit(f"{src} is not a Ref2VA PTD file (no ptd_num_hops metadata)")
 q, qmeta = pdd.to_int8(tensors, meta)
+repo = "MiniMax-H3-PTD-RefAsymOPD-LoRAs" if "RefAsymOPD" in os.path.basename(src) else "MiniMax-H3-PTD-LoRAs"
 qmeta["ptd_modified"] = json.dumps({
-    "note": "Modified from taobao-content-ai/MiniMax-H3-PTD-LoRAs: lora_down / lora_up quantized to int8 with one "
+    "note": f"Modified from taobao-content-ai/{repo}: lora_down / lora_up quantized to int8 with one "
             "float32 scale per row (github.com/Nynxz/ComfyUI-PTD-Compact). PDD heads unchanged.",
     "source": os.path.basename(src)})
 
