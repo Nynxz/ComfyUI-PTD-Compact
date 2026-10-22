@@ -22,8 +22,8 @@ Put the adapter files in `ComfyUI/models/ptd/`, then wire
 `Load Diffusion Model → Load PTD MiniMax-H3 Adapters (compact) → Basic Guider + PTD Sampler (compact) +
 PTD Sigmas (compact) → SamplerCustomAdvanced`
 
-The step count comes from the file. The official PTD Sampler / Sigmas also work for the EPFL files, but not
-for Ref2VA, whose step times are its own. If ComfyUI imports the official pack first, its
+The step count comes from the file. With this loader in the graph, the official PTD Sampler / Sigmas work
+too, for both releases (they are pointed at the same code). If ComfyUI imports the official pack first, its
 `No module named 'ptd'` error in the log is harmless: this pack registers the official nodes itself.
 
 ## Options

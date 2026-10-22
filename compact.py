@@ -372,6 +372,19 @@ def sigmas(model):
     return _sampling(patcher).ptd_sigmas(controller.recipe)
 
 
+def _install_official_nodes(patcher):
+    """Point the official PTD Sampler / Sigmas at ``make_sampler`` / ``sigmas``.
+
+    They only know the EPFL recipes and fail on a Ref2VA MODEL (``unknown recipe 'pdd_4hop'``). For EPFL files
+    ``make_sampler`` and ``sigmas`` return exactly what the official nodes did, so existing workflows keep working.
+    """
+    official = importlib.import_module(patcher.__name__.rsplit(".", 1)[0] + ".nodes")
+    if not getattr(official.PTDH3Sigmas, "ptd_compact", False):
+        official.PTDH3Sampler.get_sampler = lambda self, model: (make_sampler(model),)
+        official.PTDH3Sigmas.get_sigmas = lambda self, model: (sigmas(model),)
+        official.PTDH3Sampler.ptd_compact = official.PTDH3Sigmas.ptd_compact = True
+
+
 def _install_progress(patcher):
     """Wrap the registered pack's ``sample_ptd``; ``make_sampler`` looks it up when PTD Sampler runs."""
     sampling = _sampling(patcher)
@@ -400,6 +413,7 @@ def _patch(model, path):
     checkpoint, patcher = ptd_modules()
     _install_progress(patcher)
     _install_residual(patcher)
+    _install_official_nodes(patcher)
     tensors, meta = read(path)
     if pdd.is_pdd(meta):  # taobao-content-ai Ref2VA files (bf16, or this pack's int8 version)
         for key, value in tensors.items():

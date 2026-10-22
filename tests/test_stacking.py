@@ -490,3 +490,15 @@ def test_compact_sampler_and_sigmas_cover_both_formats(tmp_path):
     from ptd_comfy.sampling import ptd_sigmas
     assert torch.equal(compact.sigmas(e), ptd_sigmas("h3_4step"))
     assert compact.make_sampler(e).sampler_function.ptd_progress
+
+
+def test_official_sampler_and_sigmas_take_ref2va_models(tmp_path):
+    """After the compact loader runs, the official PTD Sampler / Sigmas nodes also handle Ref2VA MODELs."""
+    from ptd_comfy import nodes as official
+    base = native_model()
+    ref2va_file(str(tmp_path / "r.safetensors"), base.get_model_object("diffusion_model"))
+    model = compact.patch_compact(base, str(tmp_path / "r.safetensors"))
+    (grid,) = official.PTDH3Sigmas().get_sigmas(model)
+    assert torch.equal(grid, compact.pdd.hop_sigmas(4).float())
+    (sampler,) = official.PTDH3Sampler().get_sampler(model)
+    assert sampler.extra_options["controller"] is model.model_options["ptd_native_controller"]
