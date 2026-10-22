@@ -289,27 +289,44 @@ def patch(model, tensors, meta, patcher, sampling, base_cls, expert_cls,
 
 
 @torch.no_grad()
-def sample(model, x, sigmas, extra_args=None, callback=None, disable=None, *, controller, sampling):
-    """The official fixed-hop recurrence (ptd_comfy.sampling.sample_ptd) on this checkpoint's own grid."""
+def sample(model, x, sigmas, extra_args=None, callback=None, disable=None, *, controller, sampling,
+           hops=None, start=None, capture=None):
+    """The official fixed-hop recurrence (ptd_comfy.sampling.sample_ptd) on this checkpoint's own grid.
+
+    ``hops=(first, stop)`` runs only hops ``first .. stop-1``, on that slice of the grid (progressive sampling,
+    see ``progressive.py``). ``start`` is then the state entering hop ``first`` (else hop 0 starts from the
+    noise), and ``capture`` (a dict) receives the last hop's input state, x0 and output state.
+    """
     del disable
-    expected = controller.sigmas
+    first_hop, stop_hop = (0, controller.hops) if hops is None else hops
+    if not 0 <= first_hop < stop_hop <= controller.hops:
+        raise ValueError(f"PTD hop range {first_hop}..{stop_hop} is outside 0..{controller.hops}")
+    expected = controller.sigmas[first_hop:stop_hop + 1]
     if not isinstance(sigmas, torch.Tensor) or sigmas.ndim != 1 or sigmas.shape != expected.shape or \
             not torch.equal(sigmas.detach().cpu(), expected.to(sigmas.dtype)):
         raise ValueError(f"PTD requires this checkpoint's {controller.hops}-hop grid; use PTD Sigmas (compact)")
     extra_args = {} if extra_args is None else dict(extra_args)
     sampling._validate_initial_inputs(model, extra_args)
     raw_noise = getattr(model, "noise", None)
-    state = sampling.initial_state(raw_noise) if raw_noise is not None else sampling._map(x, lambda v: v.float())
+    if start is not None:
+        state = sampling._map(start, lambda v: v.to(device=sampling._streams(x)[0].device, dtype=torch.float32))
+    elif first_hop != 0:
+        raise ValueError("PTD sampling from a later hop needs the state entering it")
+    else:
+        state = sampling.initial_state(raw_noise) if raw_noise is not None else sampling._map(x, lambda v: v.float())
     sampling._pair(state, x, lambda a, b: a)
     first = sampling._streams(state)[0]
     grid = expected.to(device=first.device)
-    for hop in range(len(grid) - 1):
-        time = float(grid[hop])
+    for i, hop in enumerate(range(first_hop, stop_hop)):
+        time = float(grid[i])
         with controller.activate(hop, time):
-            denoised = model(state, grid[hop].expand(first.shape[0]), **extra_args)
+            denoised = model(state, grid[i].expand(first.shape[0]), **extra_args)
         velocity = sampling.denoised_to_velocity(state, denoised, time)
         if callback is not None:
-            callback({"x": state, "i": hop, "sigma": grid[hop], "sigma_hat": grid[hop], "denoised": denoised})
-        delta = (grid[hop + 1] - grid[hop]).float()
-        state = sampling._pair(state, velocity, lambda value, flow, delta=delta: value.float() + delta * flow.float())
+            callback({"x": state, "i": i, "sigma": grid[i], "sigma_hat": grid[i], "denoised": denoised})
+        delta = (grid[i + 1] - grid[i]).float()
+        update = sampling._pair(state, velocity, lambda value, flow, delta=delta: value.float() + delta * flow.float())
+        if capture is not None and hop == stop_hop - 1:
+            capture.update(x=state, denoised=denoised, next=update)
+        state = update
     return state

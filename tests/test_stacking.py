@@ -502,3 +502,157 @@ def test_official_sampler_and_sigmas_take_ref2va_models(tmp_path):
     assert torch.equal(grid, compact.pdd.hop_sigmas(4).float())
     (sampler,) = official.PTDH3Sampler().get_sampler(model)
     assert sampler.extra_options["controller"] is model.model_options["ptd_native_controller"]
+
+
+# ------------------------------------------------------------------ progressive (SelfLift) sampling
+
+progressive = importlib.import_module("ComfyUI-PTD-Compact.progressive")
+CONTEXT = lambda: [[torch.randn(1, 6, DIMS["text_dim"], generator=torch.Generator().manual_seed(3)), {}]]  # noqa: E731
+
+
+def _ref2va_model(tmp_path, hops=4):
+    base = native_model()
+    ref2va_file(str(tmp_path / f"r{hops}.safetensors"), base.get_model_object("diffusion_model"), hops=hops)
+    return compact.patch_compact(base, str(tmp_path / f"r{hops}.safetensors"))
+
+
+def _latent(h=4, w=4):
+    import comfy.nested_tensor
+    return {"samples": comfy.nested_tensor.NestedTensor([torch.zeros(1, 24, 2, h, w), torch.zeros(1, 32, 2, 3)])}
+
+
+def _recording(monkeypatch):
+    """Record every call of the PDD sampler: its grid, (flat-packed) latent shape and options."""
+    calls, original = [], compact._pdd_sample
+
+    def run(model, x, sigmas, **kwargs):
+        calls.append({"sigmas": sigmas.clone(), "shape": tuple(x.shape), **kwargs})
+        return original(model, x, sigmas, **kwargs)
+
+    monkeypatch.setattr(compact, "_pdd_sample", run)
+    return calls
+
+
+def test_split_hops_equal_one_run(tmp_path):
+    """Hops 0..k-1 then k..N-1 from the carried state give the same sample as one run."""
+    import comfy.nested_tensor
+    import comfy.samplers
+    model = _ref2va_model(tmp_path, hops=4)
+    controller = model.model_options["ptd_native_controller"]
+    sampling, grid = compact._sampling(compact.ptd_modules()[1]), compact.sigmas(model)
+    latent = _latent()["samples"]
+    noise = comfy.nested_tensor.NestedTensor([torch.randn(t.shape, generator=torch.Generator().manual_seed(4 + i))
+                                              for i, t in enumerate(latent.unbind())])
+    zeros = comfy.nested_tensor.NestedTensor([torch.zeros_like(t) for t in latent.unbind()])
+
+    def run(noise, sigmas, **options):
+        guider = comfy.samplers.CFGGuider(model)
+        guider.set_conds(CONTEXT(), CONTEXT())
+        guider.set_cfg(1.0)
+        sampler = comfy.samplers.KSAMPLER(compact._pdd_sample, extra_options={
+            "controller": controller, "sampling": sampling, **options})
+        return guider.sample(noise, latent, sampler, sigmas, disable_pbar=True, seed=7)
+
+    try:
+        whole = run(noise, grid)
+        capture = {}
+        run(noise, grid[:3], hops=(0, 2), capture=capture)
+        split = run(zeros, grid[2:], hops=(2, 4), start=capture["next"])
+    finally:
+        comfy.model_management.unload_all_models()
+    for a, b in zip(whole.unbind(), split.unbind()):
+        assert torch.allclose(a, b, rtol=1e-6, atol=1e-6), float((a - b).abs().max())
+
+
+def test_partial_hops_are_refused_without_a_start(tmp_path):
+    model = _ref2va_model(tmp_path)
+    controller = model.model_options["ptd_native_controller"]
+    sampling = compact._sampling(compact.ptd_modules()[1])
+    with pytest.raises(ValueError, match="state entering"):
+        compact.pdd.sample(None, _latent()["samples"], compact.sigmas(model)[1:], controller=controller,
+                           sampling=sampling, hops=(1, 4))
+    with pytest.raises(ValueError, match="hop grid"):  # the plain sampler still wants the whole grid
+        compact.pdd.sample(None, _latent()["samples"], compact.sigmas(model)[:3], controller=controller,
+                           sampling=sampling)
+
+
+@pytest.mark.parametrize("hops,k", [(4, 2), (8, 6)])
+def test_progressive_runs_early_hops_small_and_renoises_the_lift(tmp_path, monkeypatch, hops, k):
+    """Hops 0..k-1 run on the half-size latent, k..N-1 at full size from t·n' + (1-t)·lift(x0), the audio carried."""
+    import comfy.sample
+    import comfy.utils
+    calls = _recording(monkeypatch)
+    model = _ref2va_model(tmp_path, hops)
+    latent_format = model.get_model_object("latent_format")
+    lifted = []
+
+    def lift(z0_low, out_hw):  # nearest, in the VAE's space
+        z = torch.nn.functional.interpolate(z0_low.float(), size=(z0_low.shape[2], *out_hw), mode="nearest")
+        lifted.append(z)
+        return z, None
+
+    try:
+        out = progressive.sample(model, CONTEXT(), _latent(), seed=11, transition_hop=k, lowres_scale=0.5, lift=lift)
+    finally:
+        comfy.model_management.unload_all_models()
+    grid = compact.sigmas(model)
+    low, high = calls
+    audio_size = 32 * 2 * 3  # samplers see video + audio as one flat [B, 1, N] pack
+    assert low["hops"] == (0, k) and low["shape"] == (1, 1, 24 * 2 * 2 * 2 + audio_size)
+    assert high["hops"] == (k, hops) and high["shape"] == (1, 1, 24 * 2 * 4 * 4 + audio_size)
+    assert torch.equal(low["sigmas"], grid[:k + 1]) and torch.equal(high["sigmas"], grid[k:])
+    video, audio = out["samples"].unbind()
+    assert video.shape == (1, 24, 2, 4, 4) and audio.shape == (1, 32, 2, 3)
+    assert torch.isfinite(video).all() and torch.isfinite(audio).all()
+
+    low_shapes = [(1, 24, 2, 2, 2), (1, 32, 2, 3)]
+    start = comfy.utils.unpack_latents(high["start"], [(1, 24, 2, 4, 4), (1, 32, 2, 3)])
+    carried = comfy.utils.unpack_latents(low["capture"]["next"], low_shapes)
+    t = float(grid[k])
+    z0 = latent_format.process_in(lifted[0])
+    fresh = comfy.sample.prepare_noise(z0, 12, None).to(z0)
+    assert torch.allclose(start[0], t * fresh + (1 - t) * z0, atol=1e-5)
+    assert torch.equal(start[1], carried[1].float())
+
+
+def test_progressive_refuses_bad_settings(tmp_path):
+    model = _ref2va_model(tmp_path, hops=4)
+    lift = lambda z, hw: (z, None)  # noqa: E731
+    with pytest.raises(ValueError, match="transition_hop"):
+        progressive.sample(model, CONTEXT(), _latent(), 0, 4, 0.5, lift)
+    masked = {**_latent(), "noise_mask": torch.ones(1, 4, 4)}
+    with pytest.raises(ValueError, match="noise masks"):
+        progressive.sample(model, CONTEXT(), masked, 0, 2, 0.5, lift)
+    base = native_model()
+    adapter_file(str(tmp_path / "a.safetensors"), base.get_model_object("diffusion_model"))
+    with pytest.raises(ValueError, match="Ref2VA"):
+        progressive.sample(compact.patch_compact(base, str(tmp_path / "a.safetensors")), CONTEXT(), _latent(), 0, 2,
+                           0.5, lift)
+
+
+class _PixelVAE:
+    """Stand-in video VAE: 2x pixels per latent cell, first three channels as RGB."""
+    vae_dtype, device = torch.float32, torch.device("cpu")
+
+    def decode(self, z):
+        frames = z[0, :3].permute(1, 2, 3, 0)
+        return frames.repeat_interleave(2, 1).repeat_interleave(2, 2)
+
+    def encode(self, frames):
+        x = torch.nn.functional.avg_pool2d(frames.movedim(-1, 1).float(), 2)  # [T, 3, H, W]
+        return x.permute(1, 0, 2, 3)[None].repeat(1, 8, 1, 1, 1)
+
+
+@pytest.mark.skipif(not os.environ.get("PTD_SELFLIFT_DIR"), reason="set PTD_SELFLIFT_DIR to a comfyui-SelfLift checkout")
+@pytest.mark.parametrize("rho", [0.0, 0.6, 1.0])
+def test_node_with_real_selflift(tmp_path, rho):
+    """The node end to end with SelfLift's own lift and correction (nearest, pixel anchor, pure anchor)."""
+    nodes = importlib.import_module("ComfyUI-PTD-Compact.nodes")
+    model = _ref2va_model(tmp_path, hops=4)
+    try:
+        (out,) = nodes.PTDH3SelfLiftSampler().sample(model, CONTEXT(), _PixelVAE(), _latent(), 3, 2, 0.5, rho, 1.0, 1.0,
+                                                     "none")
+    finally:
+        comfy.model_management.unload_all_models()
+    video, audio = out["samples"].unbind()
+    assert video.shape == (1, 24, 2, 4, 4) and torch.isfinite(video).all() and torch.isfinite(audio).all()

@@ -74,10 +74,28 @@ noise. The int8 base runs about 3× faster than the bf16 one on a 32 GB card.
 - **Ref2VA** output matches taobao-content-ai's own ComfyUI implementation bit for bit in `exact` mode.
 - **Other LoRAs** stack with PTD in either order.
 
+## SelfLift (experimental)
+
+**PTD SelfLift Sampler (compact, experimental)** applies [SelfLift](https://github.com/facok/comfyui-SelfLift)'s
+progressive resolution to the Ref2VA files. Hops `0 … transition_hop-1` run on a `lowres_scale` latent, the
+last of them predicts the clean video, SelfLift lifts it to full size (nearest, its pixel-VAE anchor `rho`, or
+its external H3 latent upscaler) and the remaining hops run at full size. The hop count is unchanged and every
+hop still runs at its trained time. It needs comfyui-SelfLift installed next to this pack, and it replaces
+`SamplerCustomAdvanced`: wire the PTD model, the positive conditioning, the video VAE and the empty latent from
+MiniMax H3 Reference to Video straight into it.
+
+Neither H3 nor the adapters were trained at the low resolution, so treat it as a speed experiment and compare
+against a plain PTD render on the same seed.
+
 ## Tests
 
+From the `tests` directory (run from the pack root, pytest collects the pack's own `__init__.py`):
+
+    cd tests
     PYTHONPATH=/path/to/ComfyUI:/path/to/ComfyUI-PTD:/path/to/custom_nodes \
-        python -m pytest tests -q --import-mode=importlib
+        python -m pytest . -q --import-mode=importlib
+
+Set `PTD_SELFLIFT_DIR` to a comfyui-SelfLift checkout to include the SelfLift tests.
 
 ## License
 
